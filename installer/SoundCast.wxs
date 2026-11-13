@@ -1,0 +1,123 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package
+    Name="SoundCast"
+    Manufacturer="story-x"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="7c3f8b2e-94a1-4e6a-8d2f-5a1b6e3c9014"
+    Scope="perMachine"
+    Language="2052"
+    Codepage="65001"
+    Compressed="yes">
+
+    <SummaryInformation Description="SoundCast - 根据应用窗口所在显示器自动切换音频输出设备" />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="已安装更高版本的 [ProductName]，无法降级安装。" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="SoundCastIcon.ico" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="SoundCastIcon.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/story-x/SoundCast" />
+
+    <!-- 升级或重装时从注册表读取上次用户选择的安装目录 -->
+    <Property Id="INSTALLFOLDER" Secure="yes">
+      <RegistrySearch
+        Id="RememberInstallPath"
+        Root="HKLM"
+        Key="Software\SoundCast"
+        Name="InstallPath"
+        Type="raw" />
+    </Property>
+
+    <!-- 防止用户直接选盘符根目录或父目录而未建 SoundCast 子目录时把文件散落到根目录 -->
+    <CustomAction
+      Id="EnsureSoundCastFolder"
+      Directory="INSTALLFOLDER"
+      Value="[INSTALLFOLDER]SoundCast\" />
+
+    <InstallExecuteSequence>
+      <Custom
+        Action="EnsureSoundCastFolder"
+        After="CostFinalize"
+        Condition='NOT Installed AND NOT (INSTALLFOLDER ~&gt;&lt; "\SoundCast\")' />
+    </InstallExecuteSequence>
+
+    <!-- 安装完成页默认勾选“启动 SoundCast” -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="立即启动 SoundCast" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtfPath)" />
+
+    <UI>
+      <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+      <Publish
+        Dialog="ExitDialog"
+        Control="Finish"
+        Event="DoAction"
+        Value="LaunchApplication"
+        Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+    </UI>
+
+    <CustomAction
+      Id="LaunchApplication"
+      FileRef="SoundCastExe"
+      ExeCommand=""
+      Execute="immediate"
+      Impersonate="yes"
+      Return="asyncNoWait" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="SoundCast" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="SoundCast" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder" />
+
+    <Feature Id="ProductFeature" Title="SoundCast" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentRef Id="ApplicationShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="a14d5c6e-2f7b-4891-9b12-8c7e4a5d3011">
+        <File Id="SoundCastExe" Source="$(var.SourceDir)\SoundCast.exe" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\SoundCast" Name="InstallPath" Type="string" Value="[INSTALLFOLDER]" />
+      </Component>
+      <Component Id="ReadmeDoc" Guid="b25e6d7f-3a8c-4902-8c23-9d8f5b6e4122">
+        <File Id="ReadmeFile" Source="$(var.SourceDir)\README.md" KeyPath="yes" />
+      </Component>
+      <Component Id="LicenseDoc" Guid="c36f7e80-4b9d-4013-9d34-0e9a6c7f5233">
+        <File Id="LicenseFile" Source="$(var.SourceDir)\LICENSE" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Component Id="ApplicationShortcut" Directory="ApplicationProgramsFolder" Guid="d4708f91-5cae-4124-ae45-1fab7d806344">
+      <Shortcut
+        Id="ApplicationStartMenuShortcut"
+        Name="SoundCast"
+        Description="根据应用窗口所在显示器自动切换音频输出设备"
+        Target="[INSTALLFOLDER]SoundCast.exe"
+        WorkingDirectory="INSTALLFOLDER"
+        Icon="SoundCastIcon.ico" />
+      <RemoveFolder Id="CleanUpShortCutFolder" On="uninstall" />
+      <RemoveFolder Id="CleanUpInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+      <RegistryValue Root="HKLM" Key="Software\SoundCast" Name="ShortcutInstalled" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <Component Id="DesktopShortcut" Directory="DesktopFolder" Guid="f692ab13-7ec0-4346-c067-31cd9f028566">
+      <Shortcut
+        Id="ApplicationDesktopShortcut"
+        Name="SoundCast"
+        Description="根据应用窗口所在显示器自动切换音频输出设备"
+        Target="[INSTALLFOLDER]SoundCast.exe"
+        WorkingDirectory="INSTALLFOLDER"
+        Icon="SoundCastIcon.ico" />
+      <RegistryValue Root="HKLM" Key="Software\SoundCast" Name="DesktopShortcutInstalled" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+  </Fragment>
+</Wix>

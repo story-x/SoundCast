@@ -1,0 +1,10 @@
+/target/
+/dist/
+/install/
+Cargo.lock
+*.pdb
+*.wixpdb
+*.msi
+config.toml
+参考项目/
+

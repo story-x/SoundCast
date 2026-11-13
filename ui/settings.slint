@@ -1,0 +1,861 @@
+import {
+    Button,
+    CheckBox,
+    ComboBox,
+    ScrollView,
+    SpinBox,
+    Switch,
+    VerticalBox,
+    Palette,
+} from "std-widgets.slint";
+
+export struct MonitorRowData {
+    device-name: string,
+    short-name: string,
+    detail: string,
+    is-primary: bool,
+    selected-index: int,
+}
+
+export struct AppOptionData {
+    exe-name: string,
+    display-name: string,
+    icon: image,
+}
+
+component Card inherits Rectangle {
+    background: Palette.alternate-background;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Palette.border;
+}
+
+component DangerButton inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+
+    height: 32px;
+    min-width: 84px;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: touch.has-hover ? #ef4444.transparentize(0.25) : Palette.border;
+    background: touch.pressed
+        ? #ef4444.transparentize(0.76)
+        : (touch.has-hover ? #ef4444.transparentize(0.86) : Palette.background);
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        Text {
+            text: root.text;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            color: touch.has-hover ? #f87171 : Palette.foreground.transparentize(0.12);
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component SettingsWindow inherits Window {
+    title: "SoundCast 设置";
+    icon: @image-url("../assets/icon.png");
+    preferred-width: 760px;
+    preferred-height: 780px;
+    min-width: 720px;
+    min-height: 750px;
+    background: Palette.background;
+    default-font-family: "Microsoft YaHei UI";
+
+    in-out property <bool> auto-switch-enabled: true;
+    in-out property <bool> auto-start-enabled: false;
+    in-out property <int> debounce-ms: 150;
+    in-out property <int> close-action-index: 0;
+    in-out property <string> project-url: "https://github.com/story-x/SoundCast";
+    in-out property <bool> close-dialog-visible: false;
+    in-out property <bool> remember-close-choice: false;
+    in-out property <[string]> audio-device-names: ["不自动切换（保持系统默认）"];
+    in-out property <[MonitorRowData]> monitor-rows: [];
+
+    in-out property <[AppOptionData]> ignored-processes: [];
+    in-out property <[AppOptionData]> available-processes: [];
+    in-out property <int> selected-process-index: 0;
+    in-out property <bool> can-add-ignored: false;
+    in-out property <AppOptionData> current-selected-app;
+
+    in-out property <string> status-text: "就绪：修改设置后点击“保存并应用”即可生效";
+    in-out property <int> redraw-nonce: 0;
+
+    callback monitor-selection-changed(int, int);
+    callback refresh-clicked();
+    callback select-available-app(int);
+    callback add-ignored-clicked(int);
+    callback remove-ignored-clicked(int);
+    callback save-clicked();
+    callback hide-to-tray-clicked();
+    callback exit-app-clicked();
+    callback open-project-url();
+    callback close-dialog-action(int, bool);
+
+    // 底层实色背景，配合 redraw-nonce 在恢复显示时触发全窗口重绘
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Palette.background;
+        opacity: Math.mod(root.redraw-nonce, 2) == 0 ? 1.0 : 0.9999;
+    }
+
+    // 带图标的应用选择弹出层
+    app-picker-popup := PopupWindow {
+        x: Math.min(root.width - 398px, picker-box.absolute-position.x - 50px);
+        y: Math.max(20px, picker-box.absolute-position.y - 296px);
+        width: 380px;
+        height: 290px;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-radius: 10px;
+            background: Palette.alternate-background;
+            border-width: 1px;
+            border-color: Palette.border;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: #000000.transparentize(0.45);
+            drop-shadow-offset-y: 4px;
+
+            VerticalLayout {
+                padding: 8px;
+                spacing: 6px;
+
+                Text {
+                    text: "选择当前正在运行的应用（已过滤已忽略项）";
+                    font-size: 11px;
+                    color: Palette.foreground.transparentize(0.35);
+                    horizontal-alignment: left;
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 4px;
+                        alignment: start;
+
+                        for app[aidx] in root.available-processes: Rectangle {
+                            height: 40px;
+                            border-radius: 6px;
+                            background: item-touch.has-hover
+                                ? Palette.accent-background.transparentize(0.84)
+                                : (aidx == root.selected-process-index ? Palette.background : transparent);
+                            border-width: aidx == root.selected-process-index ? 1px : 0px;
+                            border-color: Palette.accent-background.transparentize(0.45);
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 10px;
+
+                                Image {
+                                    width: 22px;
+                                    height: 22px;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    source: app.icon;
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    spacing: 1px;
+
+                                    Text {
+                                        text: app.display-name;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        color: Palette.foreground;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: app.exe-name;
+                                        font-size: 11px;
+                                        color: Palette.foreground.transparentize(0.42);
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+
+                            item-touch := TouchArea {
+                                clicked => {
+                                    root.select-available-app(aidx);
+                                    app-picker-popup.close();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    VerticalBox {
+        padding: 18px;
+        spacing: 12px;
+
+        // 顶部标题栏
+        HorizontalLayout {
+            height: 52px;
+            spacing: 12px;
+            alignment: space-between;
+
+            HorizontalLayout {
+                spacing: 12px;
+
+                Image {
+                    width: 50px;
+                    height: 50px;
+                    image-fit: contain;
+                    y: (parent.height - self.height) / 2;
+                    source: @image-url("../assets/logo.png");
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 3px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        alignment: start;
+                        Text {
+                            text: "SoundCast";
+                            font-size: 20px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            color: Palette.foreground;
+                        }
+                        Rectangle {
+                            height: 22px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 6px;
+                            background: url-touch.has-hover
+                                ? Palette.accent-background.transparentize(0.82)
+                                : Palette.alternate-background;
+                            border-width: 1px;
+                            border-color: url-touch.has-hover
+                                ? Palette.accent-background.transparentize(0.35)
+                                : Palette.border;
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 5px;
+                                Path {
+                                    width: 11px;
+                                    height: 11px;
+                                    y: (parent.height - self.height) / 2;
+                                    viewbox-width: 12;
+                                    viewbox-height: 12;
+                                    stroke: url-touch.has-hover ? Palette.accent-background : Palette.foreground.transparentize(0.28);
+                                    stroke-width: 1.3px;
+                                    fill: transparent;
+                                    MoveTo { x: 7; y: 2; }
+                                    LineTo { x: 10; y: 2; }
+                                    LineTo { x: 10; y: 5; }
+                                    MoveTo { x: 10; y: 2; }
+                                    LineTo { x: 5; y: 7; }
+                                    MoveTo { x: 5; y: 3; }
+                                    LineTo { x: 2; y: 3; }
+                                    LineTo { x: 2; y: 10; }
+                                    LineTo { x: 9; y: 10; }
+                                    LineTo { x: 9; y: 7; }
+                                }
+                                Text {
+                                    text: root.project-url;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    color: url-touch.has-hover
+                                        ? Palette.accent-background
+                                        : Palette.foreground.transparentize(0.2);
+                                }
+                            }
+                            url-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.open-project-url();
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        text: "根据应用窗口所在的显示器，自动切换该应用的音频播放设备";
+                        font-size: 12px;
+                        color: Palette.foreground.transparentize(0.32);
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 28px;
+                min-width: 96px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 14px;
+                background: root.auto-switch-enabled ? #107c10.transparentize(0.84) : Palette.border.transparentize(0.5);
+                border-width: 1px;
+                border-color: root.auto-switch-enabled ? #107c10.transparentize(0.5) : Palette.border;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 6px;
+                    alignment: center;
+
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 4px;
+                        background: root.auto-switch-enabled ? #16a34a : Palette.foreground.transparentize(0.5);
+                    }
+
+                    Text {
+                        text: root.auto-switch-enabled ? "运行中" : "已暂停";
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        color: root.auto-switch-enabled ? #16a34a : Palette.foreground.transparentize(0.3);
+                    }
+                }
+            }
+        }
+
+        // 常规设置卡片（对称双栏布局）
+        Card {
+            height: 118px;
+            VerticalBox {
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 8px;
+
+                Text {
+                    text: "常规设置";
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: Palette.foreground;
+                }
+
+                HorizontalLayout {
+                    spacing: 20px;
+
+                    // 左栏：核心开关
+                    VerticalLayout {
+                        width: 240px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        HorizontalLayout {
+                            height: 32px;
+                            Switch {
+                                text: "启用自动切换";
+                                checked <=> root.auto-switch-enabled;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            height: 32px;
+                            Switch {
+                                text: "开机自启动";
+                                checked <=> root.auto-start-enabled;
+                            }
+                        }
+                    }
+
+                    // 细分隔线
+                    Rectangle {
+                        width: 1px;
+                        height: 58px;
+                        y: (parent.height - self.height) / 2;
+                        background: Palette.border.transparentize(0.45);
+                    }
+
+                    // 右栏：数值与关闭行为设置（右侧控件等宽对齐）
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 6px;
+                        alignment: center;
+
+                        HorizontalLayout {
+                            height: 32px;
+                            spacing: 10px;
+                            Text {
+                                text: "防抖延迟 (ms)";
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                color: Palette.foreground;
+                            }
+                            SpinBox {
+                                width: 156px;
+                                height: 32px;
+                                minimum: 50;
+                                maximum: 2000;
+                                step-size: 50;
+                                value <=> root.debounce-ms;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            height: 32px;
+                            spacing: 10px;
+                            Text {
+                                text: "点 × 关闭窗口时";
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                color: Palette.foreground;
+                            }
+                            ComboBox {
+                                width: 156px;
+                                height: 32px;
+                                model: ["每次询问", "隐藏到托盘", "退出应用"];
+                                current-index <=> root.close-action-index;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 显示器映射卡片
+        Card {
+            min-height: 185px;
+            vertical-stretch: 1;
+            VerticalBox {
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    height: 32px;
+                    alignment: space-between;
+                    Text {
+                        text: "显示器与音频播放设备映射";
+                        font-size: 14px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        color: Palette.foreground;
+                    }
+                    Button {
+                        text: "刷新设备与进程";
+                        height: 30px;
+                        y: (parent.height - self.height) / 2;
+                        clicked => {
+                            root.refresh-clicked();
+                        }
+                    }
+                }
+
+                ScrollView {
+                    min-height: 140px;
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 2px;
+                        spacing: 8px;
+                        alignment: start;
+
+                        if root.monitor-rows.length == 0: Rectangle {
+                            height: 48px;
+                            Text {
+                                text: "未检测到活跃显示器，请点击右上角“刷新设备与进程”。";
+                                font-size: 13px;
+                                color: Palette.foreground.transparentize(0.4);
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        for row[idx] in root.monitor-rows: Rectangle {
+                            height: 56px;
+                            border-radius: 8px;
+                            background: Palette.background;
+                            border-width: 1px;
+                            border-color: Palette.border.transparentize(0.4);
+
+                            HorizontalLayout {
+                                padding-left: 14px;
+                                padding-right: 14px;
+                                spacing: 14px;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 3px;
+                                    min-width: 240px;
+                                    horizontal-stretch: 1;
+
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        spacing: 8px;
+                                        Text {
+                                            text: row.short-name;
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                            color: Palette.foreground;
+                                        }
+                                        if row.is-primary: Rectangle {
+                                            height: 18px;
+                                            horizontal-stretch: 0;
+                                            y: (parent.height - self.height) / 2;
+                                            border-radius: 4px;
+                                            background: Palette.accent-background.transparentize(0.82);
+                                            HorizontalLayout {
+                                                padding-left: 6px;
+                                                padding-right: 6px;
+                                                Text {
+                                                    text: "主屏";
+                                                    font-size: 11px;
+                                                    font-weight: 600;
+                                                    vertical-alignment: center;
+                                                    color: Palette.accent-background;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: row.detail;
+                                        font-size: 11px;
+                                        color: Palette.foreground.transparentize(0.38);
+                                        overflow: elide;
+                                    }
+                                }
+
+                                ComboBox {
+                                    min-width: 330px;
+                                    preferred-width: 350px;
+                                    horizontal-stretch: 0;
+                                    y: (parent.height - self.height) / 2;
+                                    model: root.audio-device-names;
+                                    current-index: row.selected-index;
+                                    selected(val) => {
+                                        root.monitor-selection-changed(idx, self.current-index);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 忽略进程卡片（带应用图标下拉选择器 + 防重复添加）
+        Card {
+            min-height: 175px;
+            vertical-stretch: 1;
+            VerticalBox {
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    height: 32px;
+                    spacing: 8px;
+                    Text {
+                        text: "忽略的进程名（不自动切换）";
+                        font-size: 14px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        color: Palette.foreground;
+                    }
+
+                    // 带图标选择框按钮
+                    picker-box := Rectangle {
+                        width: 288px;
+                        height: 32px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 6px;
+                        background: !root.can-add-ignored
+                            ? Palette.background.transparentize(0.4)
+                            : (picker-touch.has-hover ? Palette.background.brighter(0.15) : Palette.background);
+                        border-width: 1px;
+                        border-color: Palette.border;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+
+                            if root.can-add-ignored: Image {
+                                width: 18px;
+                                height: 18px;
+                                y: (parent.height - self.height) / 2;
+                                image-fit: contain;
+                                source: root.current-selected-app.icon;
+                            }
+
+                            Text {
+                                text: root.can-add-ignored
+                                    ? (root.current-selected-app.display-name + " (" + root.current-selected-app.exe-name + ")")
+                                    : "暂无可添加的新运行应用";
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                                color: root.can-add-ignored
+                                    ? Palette.foreground
+                                    : Palette.foreground.transparentize(0.45);
+                            }
+
+                            Path {
+                                width: 10px;
+                                height: 6px;
+                                y: (parent.height - self.height) / 2;
+                                viewbox-width: 10;
+                                viewbox-height: 6;
+                                stroke: Palette.foreground.transparentize(0.3);
+                                stroke-width: 1.4px;
+                                fill: transparent;
+                                MoveTo { x: 1; y: 1; }
+                                LineTo { x: 5; y: 5; }
+                                LineTo { x: 9; y: 1; }
+                            }
+                        }
+
+                        picker-touch := TouchArea {
+                            enabled: root.can-add-ignored;
+                            clicked => {
+                                app-picker-popup.show();
+                            }
+                        }
+                    }
+
+                    Button {
+                        text: "添加";
+                        height: 32px;
+                        min-width: 68px;
+                        y: (parent.height - self.height) / 2;
+                        enabled: root.can-add-ignored;
+                        clicked => {
+                            root.add-ignored-clicked(root.selected-process-index);
+                        }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 2px;
+                        spacing: 6px;
+                        alignment: start;
+
+                        if root.ignored-processes.length == 0: Rectangle {
+                            height: 92px;
+                            border-radius: 8px;
+                            background: Palette.background.transparentize(0.45);
+                            border-width: 1px;
+                            border-color: Palette.border.transparentize(0.55);
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 4px;
+                                Text {
+                                    text: "当前没有忽略的进程";
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    color: Palette.foreground.transparentize(0.32);
+                                }
+                                Text {
+                                    text: "可点击右上角选择框挑选正在运行的应用添加；列表为空时所有应用均参与自动切换";
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    color: Palette.foreground.transparentize(0.5);
+                                }
+                            }
+                        }
+
+                        for proc[pidx] in root.ignored-processes: Rectangle {
+                            height: 36px;
+                            border-radius: 6px;
+                            background: Palette.background;
+                            border-width: 1px;
+                            border-color: Palette.border.transparentize(0.5);
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 8px;
+                                spacing: 10px;
+
+                                Image {
+                                    width: 20px;
+                                    height: 20px;
+                                    y: (parent.height - self.height) / 2;
+                                    image-fit: contain;
+                                    source: proc.icon;
+                                }
+
+                                Text {
+                                    text: proc.display-name != "" && proc.display-name != proc.exe-name
+                                        ? (proc.display-name + "  ·  " + proc.exe-name)
+                                        : proc.exe-name;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                    color: Palette.foreground;
+                                }
+
+                                Button {
+                                    text: "移除";
+                                    height: 24px;
+                                    y: (parent.height - self.height) / 2;
+                                    clicked => {
+                                        root.remove-ignored-clicked(pidx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 底部状态与操作按钮栏
+        HorizontalLayout {
+            height: 34px;
+            spacing: 8px;
+
+            Text {
+                text: root.status-text;
+                font-size: 12px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                color: Palette.foreground.transparentize(0.28);
+                overflow: elide;
+            }
+
+            DangerButton {
+                text: "退出应用";
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    root.exit-app-clicked();
+                }
+            }
+
+            Rectangle {
+                width: 1px;
+                height: 18px;
+                y: (parent.height - self.height) / 2;
+                background: Palette.border.transparentize(0.35);
+            }
+
+            Button {
+                text: "隐藏到托盘";
+                height: 32px;
+                min-width: 96px;
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    root.hide-to-tray-clicked();
+                }
+            }
+
+            Button {
+                text: "保存并应用";
+                primary: true;
+                height: 32px;
+                min-width: 104px;
+                y: (parent.height - self.height) / 2;
+                clicked => {
+                    root.save-clicked();
+                }
+            }
+        }
+    }
+
+    // 点击窗口关闭按钮时的操作确认弹窗
+    if root.close-dialog-visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #000000.transparentize(0.45);
+
+        // 拦截底层控件点击
+        TouchArea {}
+
+        Rectangle {
+            width: 420px;
+            height: 210px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 12px;
+            background: Palette.alternate-background;
+            border-width: 1px;
+            border-color: Palette.border;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #000000.transparentize(0.35);
+            drop-shadow-offset-y: 8px;
+
+            VerticalBox {
+                padding: 20px;
+                spacing: 12px;
+
+                Text {
+                    text: "关闭设置窗口";
+                    font-size: 16px;
+                    font-weight: 700;
+                    color: Palette.foreground;
+                }
+
+                Text {
+                    text: "关闭窗口时，您希望隐藏到系统托盘继续后台运行，还是直接退出 SoundCast？";
+                    font-size: 13px;
+                    wrap: word-wrap;
+                    color: Palette.foreground.transparentize(0.18);
+                }
+
+                CheckBox {
+                    text: "记住我的选择（后续可在“常规设置”中修改）";
+                    checked <=> root.remember-close-choice;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+
+                    Button {
+                        text: "取消";
+                        height: 32px;
+                        min-width: 76px;
+                        clicked => {
+                            root.close-dialog-visible = false;
+                        }
+                    }
+
+                    DangerButton {
+                        text: "退出应用";
+                        min-width: 88px;
+                        clicked => {
+                            root.close-dialog-action(2, root.remember-close-choice);
+                        }
+                    }
+
+                    Button {
+                        text: "隐藏到托盘";
+                        primary: true;
+                        height: 32px;
+                        min-width: 100px;
+                        clicked => {
+                            root.close-dialog-action(1, root.remember-close-choice);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

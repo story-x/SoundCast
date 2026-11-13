@@ -4,18 +4,21 @@ mod app_icon;
 mod audio;
 mod config;
 mod monitor;
+mod switch_log;
 mod tray;
 mod ui;
 mod window_hook;
 
 use audio::{
-    enumerate_playback_devices, exe_file_name_lower, get_process_exe_path, switch_process_audio,
-    AudioDevice, AudioPolicyConfig, DeviceNotificationClient,
+    enumerate_playback_devices, exe_file_name_lower, get_process_exe_path, set_device_volume,
+    switch_process_audio, AudioDevice, AudioPolicyConfig, DeviceNotificationClient,
 };
 use config::{is_auto_start_enabled, open_config_in_editor, set_auto_start, AppConfig};
 use monitor::{enumerate_monitors, monitor_for_window, MonitorInfo};
+use switch_log::{append_switch_log, now_local_timestamp, SwitchLogEntry};
 use muda::MenuEvent;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use tray::{TrayAction, TrayController};
 use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
@@ -35,10 +38,10 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowExW, FindWindowW, GetMessageW,
-    GetWindowThreadProcessId, IsIconic, KillTimer, PostMessageW, PostQuitMessage, RegisterClassW,
-    SetForegroundWindow, SetTimer, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
-    HWND_MESSAGE, MSG, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, KillTimer, PostMessageW, PostQuitMessage,
+    RegisterClassW, SetForegroundWindow, SetTimer, ShowWindow, TranslateMessage, CS_HREDRAW,
+    CS_VREDRAW, HWND_MESSAGE, MSG, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE, WM_APP, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 const WM_APP_WINDOW_EVENT: u32 = WM_APP + 1;
@@ -58,6 +61,7 @@ struct AppState {
     policy: Option<AudioPolicyConfig>,
     tray: TrayController,
     pending_hwnd: Option<HWND>,
+    window_monitors: HashMap<isize, String>,
     self_pid: u32,
     last_status: String,
 }
@@ -72,7 +76,15 @@ impl AppState {
 
     fn reload_config_and_menu(&mut self) {
         self.config = AppConfig::load();
+        self.window_monitors.clear();
         self.refresh_devices_and_menu();
+    }
+
+    fn device_name_by_id<'a>(&'a self, dev_id: &str) -> Option<&'a str> {
+        self.devices
+            .iter()
+            .find(|d| d.id == dev_id)
+            .map(|d| d.name.as_str())
     }
 
     fn handle_pending_window(&mut self) {
@@ -115,18 +127,71 @@ impl AppState {
             }
         }
 
-        let switched = switch_process_audio(policy, pid, exe_path.as_deref(), &target_device_id);
-        if switched {
-            let dev_name = self
-                .devices
-                .iter()
-                .find(|d| d.id == target_device_id)
-                .map(|d| d.name.as_str())
-                .unwrap_or("目标设备");
+        let outcome = switch_process_audio(policy, pid, exe_path.as_deref(), &target_device_id);
+        if !outcome.has_audio {
+            return;
+        }
+
+        if self.window_monitors.len() > 512 {
+            self.window_monitors
+                .retain(|&k, _| unsafe { IsWindow(HWND(k as *mut _)).as_bool() });
+        }
+        let monitor_changed = self
+            .window_monitors
+            .insert(hwnd.0 as isize, monitor_name.clone())
+            .as_deref()
+            != Some(monitor_name.as_str());
+
+        let applied_vol = if outcome.switched || monitor_changed {
+            self.config
+                .monitor_volume_map
+                .get(&monitor_name)
+                .copied()
+                .filter(|&vol| set_device_volume(&target_device_id, vol))
+        } else {
+            None
+        };
+
+        let endpoint_changed = outcome.switched
+            && outcome.from_device_id.as_deref() != Some(target_device_id.as_str());
+        if endpoint_changed || applied_vol.is_some() {
+            let to_dev_name = self
+                .device_name_by_id(&target_device_id)
+                .unwrap_or("目标设备")
+                .to_string();
+            let from_dev_name = match outcome.from_device_id.as_deref() {
+                Some(fid) => self
+                    .device_name_by_id(fid)
+                    .unwrap_or("其他播放设备")
+                    .to_string(),
+                None => "系统默认".to_string(),
+            };
             let short_mon = monitor_name
                 .strip_prefix("\\\\.\\")
-                .unwrap_or(&monitor_name);
-            self.last_status = format!("最近切换: {file_name} -> {dev_name} [{short_mon}]");
+                .unwrap_or(&monitor_name)
+                .to_string();
+            let vol_suffix = match applied_vol {
+                Some(v) => format!(" (音量 {v}%)"),
+                None => String::new(),
+            };
+
+            if endpoint_changed {
+                append_switch_log(&SwitchLogEntry {
+                    timestamp: now_local_timestamp(),
+                    process_name: file_name.clone(),
+                    from_device: from_dev_name.clone(),
+                    to_device: to_dev_name.clone(),
+                    monitor_name: short_mon.clone(),
+                    volume_percent: applied_vol,
+                    exe_path: exe_path.unwrap_or_default(),
+                });
+                self.last_status = format!(
+                    "最近切换: {file_name} | {from_dev_name} -> {to_dev_name} [{short_mon}]{vol_suffix}"
+                );
+            } else {
+                self.last_status =
+                    format!("最近切换: {to_dev_name} [{short_mon}]{vol_suffix}");
+            }
         }
     }
 
@@ -136,7 +201,10 @@ impl AppState {
         };
         match action {
             TrayAction::OpenSettings => {
-                spawn_settings_process(Some(&self.last_status));
+                spawn_settings_process(Some(&self.last_status), false);
+            }
+            TrayAction::OpenLogs => {
+                spawn_settings_process(Some(&self.last_status), true);
             }
             TrayAction::ToggleEnabled => {
                 self.config.enabled = !self.config.enabled;
@@ -200,7 +268,7 @@ fn activate_existing_settings_window() -> bool {
     false
 }
 
-fn spawn_settings_process(status: Option<&str>) {
+fn spawn_settings_process(status: Option<&str>, open_logs_tab: bool) {
     // 如果设置窗口已打开，直接前置激活，无需重新拉起进程
     if activate_existing_settings_window() {
         return;
@@ -209,6 +277,9 @@ fn spawn_settings_process(status: Option<&str>) {
     if let Ok(exe) = std::env::current_exe() {
         let mut cmd = std::process::Command::new(exe);
         cmd.arg("--settings");
+        if open_logs_tab {
+            cmd.arg("--tab").arg("logs");
+        }
         if let Some(st) = status {
             if !st.is_empty() {
                 cmd.arg("--status").arg(st);
@@ -233,8 +304,21 @@ fn run_settings_mode(args: &[String]) {
             .windows(2)
             .find(|w| w[0] == "--status")
             .map(|w| w[1].clone());
+        let initial_tab = if args
+            .windows(2)
+            .any(|w| w[0] == "--tab" && w[1] == "logs")
+        {
+            1
+        } else {
+            0
+        };
 
-        ui::run_settings_window(WM_APP_RELOAD_CONFIG, WM_APP_EXIT_APP, initial_status);
+        ui::run_settings_window(
+            WM_APP_RELOAD_CONFIG,
+            WM_APP_EXIT_APP,
+            initial_status,
+            initial_tab,
+        );
 
         CoUninitialize();
     }
@@ -296,6 +380,7 @@ fn run_daemon_loop() {
         policy,
         tray,
         pending_hwnd: None,
+        window_monitors: HashMap::new(),
         self_pid: unsafe { GetCurrentProcessId() },
         last_status: "就绪：等待应用窗口跨屏自动切换".to_string(),
     }));
@@ -341,7 +426,7 @@ fn run_daemon_loop() {
 
     // 首次启动尚未配置规则时，自动打开设置窗口
     if first_run_unconfigured {
-        spawn_settings_process(Some("首次启动：请为每个显示器选择绑定的音频输出设备"));
+        spawn_settings_process(Some("首次启动：请为每个显示器选择绑定的音频输出设备"), false);
     }
 
     // 标准 Win32 消息循环：无事件时完全阻塞挂起，CPU 0% 占用，后台内存仅数 MB
@@ -461,7 +546,7 @@ unsafe extern "system" fn wnd_proc(
                     .as_ref()
                     .map(|rc| rc.borrow().last_status.clone())
             });
-            spawn_settings_process(status.as_deref());
+            spawn_settings_process(status.as_deref(), false);
             LRESULT(0)
         }
         WM_APP_RELOAD_CONFIG => {

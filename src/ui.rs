@@ -1,17 +1,20 @@
 use crate::app_icon::{default_app_icon, enumerate_running_apps, load_exe_icon, RunningAppInfo};
-use crate::audio::{enumerate_playback_devices, AudioDevice};
+use crate::audio::{enumerate_playback_devices, get_device_volume, set_device_volume, AudioDevice};
 use crate::config::{is_auto_start_enabled, set_auto_start, AppConfig, CloseAction};
 use crate::monitor::{enumerate_monitors, MonitorInfo};
+use crate::switch_log::{clear_switch_logs, log_signature, open_log_in_editor, read_switch_logs};
 use slint::winit_030::{
     winit::{dpi::PhysicalPosition, event::WindowEvent, window::Window as WinitWindow},
     EventResult, WinitWindowAccessor,
 };
 use slint::{
-    CloseRequestResponse, ComponentHandle, Image, Model, ModelRc, SharedString, VecModel,
+    CloseRequestResponse, ComponentHandle, Image, Model, ModelRc, SharedString, Timer, TimerMode,
+    VecModel,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 use windows::core::w;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -68,14 +71,18 @@ impl SharedUiData {
         None
     }
 
-    fn build_app_option(&mut self, exe_name: &str) -> AppOptionData {
+    fn resolve_app_display(&mut self, exe_name: &str, exe_path: &str) -> AppOptionData {
         if let Some(running) = self
             .all_running_apps
             .iter()
             .find(|a| a.exe_name.eq_ignore_ascii_case(exe_name))
             .cloned()
         {
-            let icon = self.get_icon_for_path(&running.exe_path);
+            let icon = if !exe_path.is_empty() {
+                self.get_icon_for_path(exe_path)
+            } else {
+                self.get_icon_for_path(&running.exe_path)
+            };
             return AppOptionData {
                 exe_name: SharedString::from(running.exe_name),
                 display_name: SharedString::from(running.display_name),
@@ -83,13 +90,21 @@ impl SharedUiData {
             };
         }
 
-        let path = Self::resolve_system_exe_path(exe_name).unwrap_or_default();
-        let icon = self.get_icon_for_path(&path);
+        let resolved_path = if !exe_path.is_empty() {
+            exe_path.to_string()
+        } else {
+            Self::resolve_system_exe_path(exe_name).unwrap_or_default()
+        };
+        let icon = self.get_icon_for_path(&resolved_path);
         AppOptionData {
             exe_name: SharedString::from(exe_name),
             display_name: SharedString::from(exe_name),
             icon,
         }
+    }
+
+    fn build_app_option(&mut self, exe_name: &str) -> AppOptionData {
+        self.resolve_app_display(exe_name, "")
     }
 }
 
@@ -122,14 +137,23 @@ fn build_models(
     for mon in monitors {
         let bound_id = cfg.monitor_audio_map.get(&mon.device_name);
         let mut sel: i32 = 0;
+        let mut resolved_dev_id: Option<&str> = None;
         if let Some(target_id) = bound_id {
             if let Some(pos) = device_ids
                 .iter()
                 .position(|id| id.as_deref() == Some(target_id.as_str()))
             {
                 sel = pos as i32;
+                resolved_dev_id = Some(target_id.as_str());
             }
         }
+        let configured_vol = cfg.monitor_volume_map.get(&mon.device_name).copied();
+        let volume_enabled = sel > 0 && configured_vol.is_some();
+        let volume_percent = configured_vol
+            .or_else(|| resolved_dev_id.and_then(get_device_volume))
+            .unwrap_or(50)
+            .min(100) as i32;
+
         selected_indices.push(sel);
         rows.push(MonitorRowData {
             device_name: SharedString::from(mon.device_name.as_str()),
@@ -137,6 +161,8 @@ fn build_models(
             detail: SharedString::from(mon.detail.as_str()),
             is_primary: mon.is_primary,
             selected_index: sel,
+            volume_enabled,
+            volume_percent,
         });
     }
 
@@ -223,10 +249,37 @@ fn post_daemon_message(msg_id: u32) {
     }
 }
 
+fn sync_switch_logs_to_window(win: &SettingsWindow, data: &mut SharedUiData) {
+    let entries = read_switch_logs(200);
+    let count = entries.len() as i32;
+    let rows: Vec<SwitchLogRowData> = entries
+        .into_iter()
+        .map(|e| {
+            let app = data.resolve_app_display(&e.process_name, &e.exe_path);
+            SwitchLogRowData {
+                timestamp: SharedString::from(e.timestamp),
+                process_name: SharedString::from(e.process_name),
+                display_name: app.display_name,
+                icon: app.icon,
+                from_device: SharedString::from(e.from_device),
+                to_device: SharedString::from(e.to_device),
+                monitor_name: SharedString::from(e.monitor_name),
+                volume_text: e
+                    .volume_percent
+                    .map(|v| SharedString::from(format!("{v}%")))
+                    .unwrap_or_default(),
+            }
+        })
+        .collect();
+    win.set_switch_log_count(count);
+    win.set_switch_logs(ModelRc::new(VecModel::from(rows)));
+}
+
 pub fn run_settings_window(
     reload_msg_id: u32,
     exit_msg_id: u32,
     initial_status: Option<String>,
+    initial_tab: i32,
 ) {
     // 强制指定 Fluent 风格（build.rs 已编译期指定，此处双保险）
     std::env::set_var("SLINT_STYLE", "fluent");
@@ -241,6 +294,7 @@ pub fn run_settings_window(
     let ignored_list = config.ignored_processes.clone();
     let all_running_apps = enumerate_running_apps();
 
+    win.set_active_tab(initial_tab.clamp(0, 1));
     win.set_auto_switch_enabled(config.enabled);
     win.set_auto_start_enabled(is_auto_start_enabled());
     win.set_debounce_ms(config.debounce_ms as i32);
@@ -263,7 +317,72 @@ pub fn run_settings_window(
         fallback_icon: default_app_icon(),
     }));
 
-    sync_models_to_window(&win, &mut data.borrow_mut());
+    {
+        let mut d = data.borrow_mut();
+        sync_models_to_window(&win, &mut d);
+        sync_switch_logs_to_window(&win, &mut d);
+    }
+
+    // 轻量轮询切换日志文件变更，实时更新日志列表
+    let last_log_sig = Rc::new(Cell::new(log_signature()));
+    let log_timer = Timer::default();
+    {
+        let data = data.clone();
+        let weak = win.as_weak();
+        let last_sig = last_log_sig.clone();
+        log_timer.start(TimerMode::Repeated, Duration::from_millis(500), move || {
+            let sig = log_signature();
+            if sig != last_sig.get() {
+                last_sig.set(sig);
+                if let Some(w) = weak.upgrade() {
+                    let mut d = data.borrow_mut();
+                    sync_switch_logs_to_window(&w, &mut d);
+                }
+            }
+        });
+    }
+
+    // 日志页操作回调
+    {
+        let data = data.clone();
+        let weak = win.as_weak();
+        let last_sig = last_log_sig.clone();
+        win.on_refresh_logs_clicked(move || {
+            last_sig.set(log_signature());
+            if let Some(w) = weak.upgrade() {
+                let mut d = data.borrow_mut();
+                d.all_running_apps = enumerate_running_apps();
+                sync_switch_logs_to_window(&w, &mut d);
+            }
+        });
+    }
+
+    {
+        let data = data.clone();
+        let weak = win.as_weak();
+        let last_sig = last_log_sig.clone();
+        win.on_clear_logs_clicked(move || {
+            if let Some(w) = weak.upgrade() {
+                match clear_switch_logs() {
+                    Ok(_) => {
+                        last_sig.set(log_signature());
+                        let mut d = data.borrow_mut();
+                        sync_switch_logs_to_window(&w, &mut d);
+                        w.set_status_text(SharedString::from("已清空切换日志"));
+                    }
+                    Err(e) => {
+                        w.set_status_text(SharedString::from(format!("清空日志失败: {e}")));
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        win.on_open_log_file_clicked(|| {
+            open_log_in_editor();
+        });
+    }
 
     // 下拉框变更回调
     {
@@ -272,25 +391,115 @@ pub fn run_settings_window(
         win.on_monitor_selection_changed(move |row_idx, sel_idx| {
             let mut d = data.borrow_mut();
             let r = row_idx as usize;
+            let mut updated_dev_id: Option<String> = None;
+            let mut mon_dev_opt: Option<String> = None;
             if r < d.selected_indices.len() {
                 d.selected_indices[r] = sel_idx;
                 let mon_dev = d.monitors[r].device_name.clone();
                 if let Some(opt_id) = d.device_ids.get(sel_idx as usize).cloned() {
                     match opt_id {
                         Some(id) => {
-                            d.config.monitor_audio_map.insert(mon_dev, id);
+                            d.config.monitor_audio_map.insert(mon_dev.clone(), id.clone());
+                            updated_dev_id = Some(id);
                         }
                         None => {
                             d.config.monitor_audio_map.remove(&mon_dev);
+                            d.config.monitor_volume_map.remove(&mon_dev);
                         }
                     }
                 }
+                mon_dev_opt = Some(mon_dev);
             }
             if let Some(w) = weak.upgrade() {
                 let model = w.get_monitor_rows();
                 if let Some(mut row) = model.row_data(r) {
                     row.selected_index = sel_idx;
+                    if let Some(dev_id) = updated_dev_id {
+                        let has_vol = mon_dev_opt
+                            .as_ref()
+                            .is_some_and(|m| d.config.monitor_volume_map.contains_key(m));
+                        if !has_vol {
+                            row.volume_percent = get_device_volume(&dev_id).unwrap_or(50) as i32;
+                        }
+                    } else {
+                        row.volume_enabled = false;
+                    }
                     model.set_row_data(r, row);
+                }
+            }
+        });
+    }
+
+    // 单显示器音量开关切换回调
+    {
+        let data = data.clone();
+        let weak = win.as_weak();
+        win.on_monitor_volume_toggled(move |row_idx, enabled| {
+            let mut d = data.borrow_mut();
+            let r = row_idx as usize;
+            let Some(mon) = d.monitors.get(r).cloned() else {
+                return;
+            };
+            let sel_idx = d.selected_indices.get(r).copied().unwrap_or(0);
+            let dev_id = d.device_ids.get(sel_idx as usize).cloned().flatten();
+
+            let Some(w) = weak.upgrade() else {
+                return;
+            };
+            let model = w.get_monitor_rows();
+            let Some(mut row) = model.row_data(r) else {
+                return;
+            };
+
+            if enabled && sel_idx > 0 {
+                let current_vol = dev_id
+                    .as_deref()
+                    .and_then(get_device_volume)
+                    .unwrap_or_else(|| row.volume_percent.clamp(0, 100) as u8);
+                d.config
+                    .monitor_volume_map
+                    .insert(mon.device_name, current_vol);
+                row.volume_enabled = true;
+                row.volume_percent = current_vol as i32;
+            } else {
+                d.config.monitor_volume_map.remove(&mon.device_name);
+                row.volume_enabled = false;
+            }
+            model.set_row_data(r, row);
+        });
+    }
+
+    // 单显示器音量滑块拖拽/释放回调
+    {
+        let data = data.clone();
+        let weak = win.as_weak();
+        win.on_monitor_volume_changed(move |row_idx, percent, apply_live| {
+            let mut d = data.borrow_mut();
+            let r = row_idx as usize;
+            let Some(mon) = d.monitors.get(r).cloned() else {
+                return;
+            };
+            let clamped = percent.clamp(0, 100) as u8;
+            let sel_idx = d.selected_indices.get(r).copied().unwrap_or(0);
+            let dev_id = d.device_ids.get(sel_idx as usize).cloned().flatten();
+
+            if sel_idx > 0 && d.config.monitor_volume_map.contains_key(&mon.device_name) {
+                d.config
+                    .monitor_volume_map
+                    .insert(mon.device_name, clamped);
+            }
+
+            if let Some(w) = weak.upgrade() {
+                let model = w.get_monitor_rows();
+                if let Some(mut row) = model.row_data(r) {
+                    row.volume_percent = clamped as i32;
+                    model.set_row_data(r, row);
+                }
+            }
+
+            if apply_live {
+                if let Some(id) = dev_id {
+                    let _ = set_device_volume(&id, clamped);
                 }
             }
         });
@@ -390,6 +599,12 @@ pub fn run_settings_window(
             let _ = set_auto_start(w.get_auto_start_enabled());
             match d.config.save() {
                 Ok(_) => {
+                    // 立即将各显示器已启用的固定音量应用到对应设备
+                    for (mon_dev, vol) in &d.config.monitor_volume_map {
+                        if let Some(dev_id) = d.config.monitor_audio_map.get(mon_dev) {
+                            let _ = set_device_volume(dev_id, *vol);
+                        }
+                    }
                     // 通知后台守护进程热加载配置
                     post_daemon_message(reload_msg_id);
                     w.set_status_text(SharedString::from("设置已保存并热加载生效！"));

@@ -8,6 +8,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 #[derive(Debug, Clone)]
 pub enum TrayAction {
     OpenSettings,
+    OpenLogs,
     ToggleEnabled,
     BindMonitor {
         monitor_device: String,
@@ -160,6 +161,10 @@ fn build_menu(
     let open_cfg = MenuItem::new("打开配置文件 (config.toml)", true, None);
     actions.insert(open_cfg.id().clone(), TrayAction::OpenConfig);
     let _ = menu.append(&open_cfg);
+
+    let open_logs = MenuItem::new("查看切换日志...", true, None);
+    actions.insert(open_logs.id().clone(), TrayAction::OpenLogs);
+    let _ = menu.append(&open_logs);
 
     let refresh = MenuItem::new("刷新显示器与音频设备", true, None);
     actions.insert(refresh.id().clone(), TrayAction::Refresh);

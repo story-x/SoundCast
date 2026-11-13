@@ -1,13 +1,15 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::Path;
 use windows::core::{implement, w, Interface, GUID, HRESULT, HSTRING, PCWSTR};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
+use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{
-    eCommunications, eConsole, eMultimedia, eRender, EDataFlow, ERole, IAudioSessionControl2,
-    IAudioSessionManager2, IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
-    MMDeviceEnumerator, DEVICE_STATE, DEVICE_STATE_ACTIVE,
+    eCommunications, eConsole, eMultimedia, eRender, AudioSessionState, AudioSessionStateActive,
+    AudioSessionStateExpired, EDataFlow, ERole, IAudioSessionControl2, IAudioSessionManager2,
+    IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator,
+    DEVICE_STATE, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
 use windows::Win32::System::Com::{
@@ -301,32 +303,44 @@ pub fn exe_file_name_lower(exe_path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// 收集窗口 PID 以及同一可执行文件的所有活跃音频会话 PID（解决 Chrome/Edge/Electron 等多进程应用音频与窗口分离的问题）
-fn collect_matching_audio_pids(window_pid: u32, window_exe_lower: Option<&str>) -> Vec<u32> {
-    let mut pids = HashSet::new();
-    pids.insert(window_pid);
+#[derive(Debug, Clone, Default)]
+pub struct SwitchResult {
+    /// 进程是否符合音频触发条件（当仅切换有音频输出应用时，要求存在活跃音频会话）
+    pub has_audio: bool,
+    /// 是否实际执行了持久化音频端点切换
+    pub switched: bool,
+    /// 切换前的音频设备 ID（优先使用此前持久化设备，其次使用当前音频会话所在设备）
+    pub from_device_id: Option<String>,
+}
 
-    let Some(target_exe) = window_exe_lower else {
-        return pids.into_iter().collect();
-    };
-
+/// 遍历当前所有处于激活状态的播放端点上的非过期 WASAPI 音频会话
+fn for_each_render_session(mut f: impl FnMut(&str, u32, AudioSessionState)) {
     unsafe {
-        let Ok(enumerator): Result<IMMDeviceEnumerator, _> =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+        let Ok(enumerator) =
+            CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
         else {
-            return pids.into_iter().collect();
+            return;
         };
         let Ok(collection) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) else {
-            return pids.into_iter().collect();
+            return;
         };
         let Ok(dev_count) = collection.GetCount() else {
-            return pids.into_iter().collect();
+            return;
         };
 
         for d in 0..dev_count {
             let Ok(device) = collection.Item(d) else {
                 continue;
             };
+            let Ok(pwstr_id) = device.GetId() else {
+                continue;
+            };
+            let dev_id = pwstr_id.to_string().unwrap_or_default();
+            CoTaskMemFree(Some(pwstr_id.0 as *const c_void));
+            if dev_id.is_empty() {
+                continue;
+            }
+
             let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else {
                 continue;
             };
@@ -344,86 +358,95 @@ fn collect_matching_audio_pids(window_pid: u32, window_exe_lower: Option<&str>) 
                 let Ok(ctrl2) = ctrl.cast::<IAudioSessionControl2>() else {
                     continue;
                 };
-                if let Ok(sess_pid) = ctrl2.GetProcessId() {
-                    if sess_pid != 0 && !pids.contains(&sess_pid) {
-                        if let Some(sess_exe) = get_process_exe_path(sess_pid) {
-                            if sess_exe == target_exe {
-                                pids.insert(sess_pid);
-                            }
-                        }
+                let state = ctrl2.GetState().unwrap_or(AudioSessionStateExpired);
+                if state == AudioSessionStateExpired {
+                    continue;
+                }
+                if let Ok(pid) = ctrl2.GetProcessId() {
+                    if pid != 0 {
+                        f(&dev_id, pid, state);
                     }
                 }
             }
         }
     }
-
-    pids.into_iter().collect()
 }
 
-/// 枚举当前所有活跃音频会话的进程 PID
+/// 收集目标应用正在输出音频（`AudioSessionStateActive`）的 PID 及其当前所在音频设备。
+fn collect_matching_audio_targets(
+    window_pid: u32,
+    window_exe_lower: Option<&str>,
+) -> (Vec<u32>, HashMap<u32, String>) {
+    let mut pids = HashSet::new();
+    let mut session_devices: HashMap<u32, String> = HashMap::new();
+    let mut exe_cache: HashMap<u32, Option<String>> = HashMap::new();
+
+    for_each_render_session(|dev_id, sess_pid, state| {
+        if state != AudioSessionStateActive {
+            return;
+        }
+
+        let matches_app = if sess_pid == window_pid {
+            true
+        } else if let Some(target_exe) = window_exe_lower {
+            let sess_exe = exe_cache
+                .entry(sess_pid)
+                .or_insert_with(|| get_process_exe_path(sess_pid));
+            sess_exe.as_deref() == Some(target_exe)
+        } else {
+            false
+        };
+
+        if matches_app {
+            pids.insert(sess_pid);
+            session_devices
+                .entry(sess_pid)
+                .or_insert_with(|| dev_id.to_string());
+        }
+    });
+
+    (pids.into_iter().collect(), session_devices)
+}
+
+/// 枚举当前所有存在非过期音频会话的进程 PID
 pub fn enumerate_active_audio_pids() -> Vec<u32> {
     let mut pids = HashSet::new();
-
-    unsafe {
-        if let Ok(enumerator) =
-            CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-        {
-            if let Ok(collection) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
-                if let Ok(dev_count) = collection.GetCount() {
-                    for d in 0..dev_count {
-                        let Ok(device) = collection.Item(d) else {
-                            continue;
-                        };
-                        let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)
-                        else {
-                            continue;
-                        };
-                        let Ok(session_enum) = manager.GetSessionEnumerator() else {
-                            continue;
-                        };
-                        let Ok(sess_count) = session_enum.GetCount() else {
-                            continue;
-                        };
-                        for s in 0..sess_count {
-                            let Ok(ctrl) = session_enum.GetSession(s) else {
-                                continue;
-                            };
-                            let Ok(ctrl2) = ctrl.cast::<IAudioSessionControl2>() else {
-                                continue;
-                            };
-                            if let Ok(pid) = ctrl2.GetProcessId() {
-                                if pid != 0 {
-                                    pids.insert(pid);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+    for_each_render_session(|_, pid, _| {
+        pids.insert(pid);
+    });
     pids.into_iter().collect()
 }
 
-/// 将指定应用（窗口 PID + 同路径音频子进程）的音频输出切换到 target_device_id
-/// 返回 true 表示实际执行了端点切换，false 表示原本已是目标设备
+/// 将指定应用（窗口 PID + 同路径正在输出音频的子进程）的音频输出切换到 target_device_id
 pub fn switch_process_audio(
     policy: &AudioPolicyConfig,
     window_pid: u32,
     exe_path_lower: Option<&str>,
     target_device_id: &str,
-) -> bool {
-    let target_pids = collect_matching_audio_pids(window_pid, exe_path_lower);
+) -> SwitchResult {
+    let (target_pids, session_devices) =
+        collect_matching_audio_targets(window_pid, exe_path_lower);
+    if target_pids.is_empty() {
+        return SwitchResult::default();
+    }
+
     let roles = [eConsole, eMultimedia, eCommunications];
     let mut switched = false;
+    let mut from_device_id: Option<String> = None;
 
     for pid in target_pids {
         // 先检查是否已经是目标设备，避免重复切换造成爆音
-        let current = policy.get_persisted_endpoint(pid, eRender, eMultimedia);
-        if current.as_deref() == Some(target_device_id) {
+        let persisted = policy.get_persisted_endpoint(pid, eRender, eMultimedia);
+        if persisted.as_deref() == Some(target_device_id) {
             continue;
         }
+        let candidate_from = persisted.or_else(|| session_devices.get(&pid).cloned());
+        if from_device_id.is_none() {
+            from_device_id = candidate_from;
+        } else if from_device_id.as_deref() == Some(target_device_id) && candidate_from.is_some() {
+            from_device_id = candidate_from;
+        }
+
         for role in roles {
             if policy
                 .set_persisted_endpoint(pid, eRender, role, target_device_id)
@@ -433,7 +456,12 @@ pub fn switch_process_audio(
             }
         }
     }
-    switched
+
+    SwitchResult {
+        has_audio: true,
+        switched,
+        from_device_id,
+    }
 }
 
 /// 音频设备变更通知客户端，用于在耳机/显示器音频设备插拔时刷新菜单
@@ -488,5 +516,33 @@ impl IMMNotificationClient_Impl for DeviceNotificationClient_Impl {
     ) -> windows::core::Result<()> {
         Ok(())
     }
+}
+
+fn open_endpoint_volume(device_id: &str) -> Option<IAudioEndpointVolume> {
+    if device_id.is_empty() {
+        return None;
+    }
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let device = enumerator.GetDevice(&HSTRING::from(device_id)).ok()?;
+        device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok()
+    }
+}
+
+/// 读取指定音频播放设备当前的主音量百分比 (0..=100)
+pub fn get_device_volume(device_id: &str) -> Option<u8> {
+    let ep_vol = open_endpoint_volume(device_id)?;
+    let level = unsafe { ep_vol.GetMasterVolumeLevelScalar().ok()? };
+    Some((level.clamp(0.0, 1.0) * 100.0).round() as u8)
+}
+
+/// 设置指定音频播放设备的主音量百分比 (0..=100)
+pub fn set_device_volume(device_id: &str, percent: u8) -> bool {
+    let Some(ep_vol) = open_endpoint_volume(device_id) else {
+        return false;
+    };
+    let scalar = (percent.min(100) as f32) / 100.0;
+    unsafe { ep_vol.SetMasterVolumeLevelScalar(scalar, std::ptr::null()).is_ok() }
 }
 

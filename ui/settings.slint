@@ -3,6 +3,7 @@ import {
     CheckBox,
     ComboBox,
     ScrollView,
+    Slider,
     SpinBox,
     Switch,
     VerticalBox,
@@ -15,12 +16,25 @@ export struct MonitorRowData {
     detail: string,
     is-primary: bool,
     selected-index: int,
+    volume-enabled: bool,
+    volume-percent: int,
 }
 
 export struct AppOptionData {
     exe-name: string,
     display-name: string,
     icon: image,
+}
+
+export struct SwitchLogRowData {
+    timestamp: string,
+    process-name: string,
+    display-name: string,
+    icon: image,
+    from-device: string,
+    to-device: string,
+    monitor-name: string,
+    volume-text: string,
 }
 
 component Card inherits Rectangle {
@@ -67,12 +81,13 @@ export component SettingsWindow inherits Window {
     title: "SoundCast 设置";
     icon: @image-url("../assets/icon.png");
     preferred-width: 760px;
-    preferred-height: 780px;
+    preferred-height: 830px;
     min-width: 720px;
-    min-height: 750px;
+    min-height: 790px;
     background: Palette.background;
     default-font-family: "Microsoft YaHei UI";
 
+    in-out property <int> active-tab: 0;
     in-out property <bool> auto-switch-enabled: true;
     in-out property <bool> auto-start-enabled: false;
     in-out property <int> debounce-ms: 150;
@@ -82,6 +97,8 @@ export component SettingsWindow inherits Window {
     in-out property <bool> remember-close-choice: false;
     in-out property <[string]> audio-device-names: ["不自动切换（保持系统默认）"];
     in-out property <[MonitorRowData]> monitor-rows: [];
+    in-out property <[SwitchLogRowData]> switch-logs: [];
+    in-out property <int> switch-log-count: 0;
 
     in-out property <[AppOptionData]> ignored-processes: [];
     in-out property <[AppOptionData]> available-processes: [];
@@ -91,9 +108,16 @@ export component SettingsWindow inherits Window {
 
     in-out property <string> status-text: "就绪：修改设置后点击“保存并应用”即可生效";
     in-out property <int> redraw-nonce: 0;
+    in-out property <length> picker-popup-x: 340px;
+    in-out property <length> picker-popup-y: 360px;
 
     callback monitor-selection-changed(int, int);
+    callback monitor-volume-toggled(int, bool);
+    callback monitor-volume-changed(int, int, bool);
     callback refresh-clicked();
+    callback refresh-logs-clicked();
+    callback clear-logs-clicked();
+    callback open-log-file-clicked();
     callback select-available-app(int);
     callback add-ignored-clicked(int);
     callback remove-ignored-clicked(int);
@@ -113,8 +137,8 @@ export component SettingsWindow inherits Window {
 
     // 带图标的应用选择弹出层
     app-picker-popup := PopupWindow {
-        x: Math.min(root.width - 398px, picker-box.absolute-position.x - 50px);
-        y: Math.max(20px, picker-box.absolute-position.y - 296px);
+        x: root.picker-popup-x;
+        y: root.picker-popup-y;
         width: 380px;
         height: 290px;
 
@@ -330,6 +354,79 @@ export component SettingsWindow inherits Window {
             }
         }
 
+        // 顶部标签页切换栏
+        Rectangle {
+            height: 36px;
+            border-radius: 8px;
+            background: Palette.alternate-background;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            HorizontalLayout {
+                padding: 3px;
+                spacing: 4px;
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: 6px;
+                    background: root.active-tab == 0
+                        ? Palette.background
+                        : (tab0-touch.has-hover ? Palette.background.transparentize(0.55) : transparent);
+                    border-width: root.active-tab == 0 ? 1px : 0px;
+                    border-color: Palette.accent-background.transparentize(0.45);
+                    Text {
+                        text: "规则与设备配置";
+                        font-size: 13px;
+                        font-weight: root.active-tab == 0 ? 600 : 400;
+                        color: root.active-tab == 0
+                            ? Palette.foreground
+                            : Palette.foreground.transparentize(0.32);
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    tab0-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.active-tab = 0;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: 6px;
+                    background: root.active-tab == 1
+                        ? Palette.background
+                        : (tab1-touch.has-hover ? Palette.background.transparentize(0.55) : transparent);
+                    border-width: root.active-tab == 1 ? 1px : 0px;
+                    border-color: Palette.accent-background.transparentize(0.45);
+                    Text {
+                        text: root.switch-log-count > 0
+                            ? ("切换日志 (" + root.switch-log-count + ")")
+                            : "切换日志";
+                        font-size: 13px;
+                        font-weight: root.active-tab == 1 ? 600 : 400;
+                        color: root.active-tab == 1
+                            ? Palette.foreground
+                            : Palette.foreground.transparentize(0.32);
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    tab1-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.active-tab = 1;
+                            root.refresh-logs-clicked();
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.active-tab == 0: VerticalLayout {
+            spacing: 12px;
+            vertical-stretch: 1;
+
         // 常规设置卡片（对称双栏布局）
         Card {
             height: 118px;
@@ -431,7 +528,7 @@ export component SettingsWindow inherits Window {
 
         // 显示器映射卡片
         Card {
-            min-height: 185px;
+            min-height: 245px;
             vertical-stretch: 1;
             VerticalBox {
                 padding-left: 16px;
@@ -461,7 +558,7 @@ export component SettingsWindow inherits Window {
                 }
 
                 ScrollView {
-                    min-height: 140px;
+                    min-height: 195px;
                     vertical-stretch: 1;
                     VerticalLayout {
                         padding: 2px;
@@ -479,70 +576,125 @@ export component SettingsWindow inherits Window {
                         }
 
                         for row[idx] in root.monitor-rows: Rectangle {
-                            height: 56px;
+                            height: 92px;
                             border-radius: 8px;
                             background: Palette.background;
                             border-width: 1px;
                             border-color: Palette.border.transparentize(0.4);
 
-                            HorizontalLayout {
+                            VerticalLayout {
                                 padding-left: 14px;
                                 padding-right: 14px;
-                                spacing: 14px;
+                                padding-top: 9px;
+                                padding-bottom: 9px;
+                                spacing: 7px;
 
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: 3px;
-                                    min-width: 240px;
-                                    horizontal-stretch: 1;
+                                HorizontalLayout {
+                                    height: 38px;
+                                    spacing: 14px;
 
-                                    HorizontalLayout {
-                                        alignment: start;
-                                        spacing: 8px;
-                                        Text {
-                                            text: row.short-name;
-                                            font-size: 13px;
-                                            font-weight: 600;
-                                            vertical-alignment: center;
-                                            color: Palette.foreground;
-                                        }
-                                        if row.is-primary: Rectangle {
-                                            height: 18px;
-                                            horizontal-stretch: 0;
-                                            y: (parent.height - self.height) / 2;
-                                            border-radius: 4px;
-                                            background: Palette.accent-background.transparentize(0.82);
-                                            HorizontalLayout {
-                                                padding-left: 6px;
-                                                padding-right: 6px;
-                                                Text {
-                                                    text: "主屏";
-                                                    font-size: 11px;
-                                                    font-weight: 600;
-                                                    vertical-alignment: center;
-                                                    color: Palette.accent-background;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 3px;
+                                        min-width: 240px;
+                                        horizontal-stretch: 1;
+
+                                        HorizontalLayout {
+                                            alignment: start;
+                                            spacing: 8px;
+                                            Text {
+                                                text: row.short-name;
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                                color: Palette.foreground;
+                                            }
+                                            if row.is-primary: Rectangle {
+                                                height: 18px;
+                                                horizontal-stretch: 0;
+                                                y: (parent.height - self.height) / 2;
+                                                border-radius: 4px;
+                                                background: Palette.accent-background.transparentize(0.82);
+                                                HorizontalLayout {
+                                                    padding-left: 6px;
+                                                    padding-right: 6px;
+                                                    Text {
+                                                        text: "主屏";
+                                                        font-size: 11px;
+                                                        font-weight: 600;
+                                                        vertical-alignment: center;
+                                                        color: Palette.accent-background;
+                                                    }
                                                 }
                                             }
+                                        }
+
+                                        Text {
+                                            text: row.detail;
+                                            font-size: 11px;
+                                            color: Palette.foreground.transparentize(0.38);
+                                            overflow: elide;
+                                        }
+                                    }
+
+                                    ComboBox {
+                                        min-width: 330px;
+                                        preferred-width: 350px;
+                                        horizontal-stretch: 0;
+                                        y: (parent.height - self.height) / 2;
+                                        model: root.audio-device-names;
+                                        current-index: row.selected-index;
+                                        selected(val) => {
+                                            root.monitor-selection-changed(idx, self.current-index);
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    height: 1px;
+                                    background: Palette.border.transparentize(0.65);
+                                }
+
+                                HorizontalLayout {
+                                    height: 26px;
+                                    spacing: 12px;
+
+                                    CheckBox {
+                                        text: "固定设备音量";
+                                        enabled: row.selected-index > 0;
+                                        checked: row.volume-enabled;
+                                        toggled => {
+                                            root.monitor-volume-toggled(idx, self.checked);
+                                        }
+                                    }
+
+                                    Slider {
+                                        horizontal-stretch: 1;
+                                        minimum: 0;
+                                        maximum: 100;
+                                        step: 1;
+                                        enabled: row.selected-index > 0 && row.volume-enabled;
+                                        value: row.volume-percent;
+                                        changed(val) => {
+                                            root.monitor-volume-changed(idx, val.round(), false);
+                                        }
+                                        released(val) => {
+                                            root.monitor-volume-changed(idx, val.round(), true);
                                         }
                                     }
 
                                     Text {
-                                        text: row.detail;
-                                        font-size: 11px;
-                                        color: Palette.foreground.transparentize(0.38);
-                                        overflow: elide;
-                                    }
-                                }
-
-                                ComboBox {
-                                    min-width: 330px;
-                                    preferred-width: 350px;
-                                    horizontal-stretch: 0;
-                                    y: (parent.height - self.height) / 2;
-                                    model: root.audio-device-names;
-                                    current-index: row.selected-index;
-                                    selected(val) => {
-                                        root.monitor-selection-changed(idx, self.current-index);
+                                        width: 64px;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        color: row.selected-index > 0 && row.volume-enabled
+                                            ? Palette.accent-background
+                                            : Palette.foreground.transparentize(0.45);
+                                        text: row.selected-index > 0 && row.volume-enabled
+                                            ? (row.volume-percent + "%")
+                                            : "不调整";
                                     }
                                 }
                             }
@@ -631,6 +783,8 @@ export component SettingsWindow inherits Window {
                         picker-touch := TouchArea {
                             enabled: root.can-add-ignored;
                             clicked => {
+                                root.picker-popup-x = Math.min(root.width - 398px, picker-box.absolute-position.x - 50px);
+                                root.picker-popup-y = Math.max(20px, picker-box.absolute-position.y - 296px);
                                 app-picker-popup.show();
                             }
                         }
@@ -718,6 +872,238 @@ export component SettingsWindow inherits Window {
                                     y: (parent.height - self.height) / 2;
                                     clicked => {
                                         root.remove-ignored-clicked(pidx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        }
+
+        if root.active-tab == 1: Card {
+            vertical-stretch: 1;
+            VerticalBox {
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                spacing: 10px;
+
+                HorizontalLayout {
+                    height: 32px;
+                    spacing: 8px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        spacing: 2px;
+                        Text {
+                            text: "音频输出切换日志";
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: Palette.foreground;
+                        }
+                        Text {
+                            text: "仅针对当前正在输出音频的应用自动切换，并在切换后实时记录于此";
+                            font-size: 11px;
+                            color: Palette.foreground.transparentize(0.38);
+                            overflow: elide;
+                        }
+                    }
+
+                    Button {
+                        text: "刷新";
+                        height: 28px;
+                        y: (parent.height - self.height) / 2;
+                        clicked => {
+                            root.refresh-logs-clicked();
+                        }
+                    }
+
+                    Button {
+                        text: "打开日志文件";
+                        height: 28px;
+                        y: (parent.height - self.height) / 2;
+                        clicked => {
+                            root.open-log-file-clicked();
+                        }
+                    }
+
+                    DangerButton {
+                        text: "清空日志";
+                        height: 28px;
+                        min-width: 78px;
+                        y: (parent.height - self.height) / 2;
+                        clicked => {
+                            root.clear-logs-clicked();
+                        }
+                    }
+                }
+
+                // 表头
+                Rectangle {
+                    height: 28px;
+                    border-radius: 6px;
+                    background: Palette.background;
+                    border-width: 1px;
+                    border-color: Palette.border.transparentize(0.45);
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 10px;
+
+                        Text {
+                            width: 122px;
+                            text: "时间";
+                            font-size: 11px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            color: Palette.foreground.transparentize(0.35);
+                        }
+                        Text {
+                            width: 148px;
+                            text: "应用";
+                            font-size: 11px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            color: Palette.foreground.transparentize(0.35);
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "切换详情（原设备 -> 目标设备）";
+                            font-size: 11px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            color: Palette.foreground.transparentize(0.35);
+                        }
+                        Text {
+                            width: 98px;
+                            horizontal-alignment: right;
+                            text: "显示器 / 音量";
+                            font-size: 11px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            color: Palette.foreground.transparentize(0.35);
+                        }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 2px;
+                        spacing: 6px;
+                        alignment: start;
+
+                        if root.switch-logs.length == 0: Rectangle {
+                            height: 120px;
+                            Text {
+                                text: "暂无切换记录。当有音频输出的应用窗口跨显示器移动并切换设备后，这里会实时显示。";
+                                font-size: 13px;
+                                wrap: word-wrap;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                color: Palette.foreground.transparentize(0.42);
+                            }
+                        }
+
+                        for log[lidx] in root.switch-logs: Rectangle {
+                            height: 48px;
+                            border-radius: 7px;
+                            background: Palette.background;
+                            border-width: 1px;
+                            border-color: Palette.border.transparentize(0.5);
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 10px;
+
+                                Text {
+                                    width: 122px;
+                                    text: log.timestamp;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    color: Palette.foreground.transparentize(0.32);
+                                }
+
+                                HorizontalLayout {
+                                    width: 148px;
+                                    spacing: 8px;
+
+                                    Image {
+                                        width: 22px;
+                                        height: 22px;
+                                        y: (parent.height - self.height) / 2;
+                                        image-fit: contain;
+                                        source: log.icon;
+                                    }
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        alignment: center;
+                                        spacing: 1px;
+
+                                        Text {
+                                            text: log.display-name != "" && log.display-name != log.process-name
+                                                ? log.display-name
+                                                : log.process-name;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            overflow: elide;
+                                            color: Palette.foreground;
+                                        }
+
+                                        if log.display-name != "" && log.display-name != log.process-name: Text {
+                                            text: log.process-name;
+                                            font-size: 10px;
+                                            overflow: elide;
+                                            color: Palette.foreground.transparentize(0.42);
+                                        }
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    spacing: 2px;
+
+                                    Text {
+                                        text: "从: " + log.from-device;
+                                        font-size: 11px;
+                                        overflow: elide;
+                                        color: Palette.foreground.transparentize(0.35);
+                                    }
+                                    Text {
+                                        text: "到: " + log.to-device;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        overflow: elide;
+                                        color: Palette.accent-background;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    width: 98px;
+                                    alignment: center;
+                                    spacing: 2px;
+
+                                    Text {
+                                        horizontal-alignment: right;
+                                        text: log.monitor-name;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        color: Palette.foreground;
+                                    }
+                                    Text {
+                                        horizontal-alignment: right;
+                                        text: log.volume-text != "" ? ("音量 " + log.volume-text) : "音量不调整";
+                                        font-size: 11px;
+                                        color: log.volume-text != ""
+                                            ? Palette.accent-background
+                                            : Palette.foreground.transparentize(0.45);
                                     }
                                 }
                             }

@@ -1,6 +1,6 @@
 [package]
 name = "soundcast"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Lightweight Windows tool that automatically switches per-app audio output device based on which monitor the window is on."
 license = "MIT"
@@ -39,6 +39,7 @@ features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_System_WinRT",
     "Win32_UI_Accessibility",

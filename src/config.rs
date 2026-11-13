@@ -49,6 +49,8 @@ pub struct AppConfig {
     pub close_action: CloseAction,
     /// 显示器设备名 (如 \\.\DISPLAY1) -> 音频播放设备 ID
     pub monitor_audio_map: BTreeMap<String, String>,
+    /// 显示器设备名 (如 \\.\DISPLAY1) -> 目标主音量百分比 (0..=100)
+    pub monitor_volume_map: BTreeMap<String, u8>,
     /// 忽略的进程名（小写，不含路径）
     pub ignored_processes: Vec<String>,
 }
@@ -60,6 +62,7 @@ impl Default for AppConfig {
             debounce_ms: 150,
             close_action: CloseAction::Ask,
             monitor_audio_map: BTreeMap::new(),
+            monitor_volume_map: BTreeMap::new(),
             ignored_processes: Vec::new(),
         }
     }

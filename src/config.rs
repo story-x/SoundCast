@@ -38,7 +38,34 @@ impl CloseAction {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeMode {
+    pub fn to_index(self) -> i32 {
+        match self {
+            ThemeMode::System => 0,
+            ThemeMode::Light => 1,
+            ThemeMode::Dark => 2,
+        }
+    }
+
+    pub fn from_index(idx: i32) -> Self {
+        match idx {
+            1 => ThemeMode::Light,
+            2 => ThemeMode::Dark,
+            _ => ThemeMode::System,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     /// 是否开启自动切换
@@ -47,6 +74,8 @@ pub struct AppConfig {
     pub debounce_ms: u64,
     /// 点击关闭按钮时的行为（每次询问 / 隐藏到托盘 / 退出应用）
     pub close_action: CloseAction,
+    /// 设置界面主题模式（跟随系统 / 浅色 / 深色）
+    pub theme_mode: ThemeMode,
     /// 显示器设备名 (如 \\.\DISPLAY1) -> 音频播放设备 ID
     pub monitor_audio_map: BTreeMap<String, String>,
     /// 显示器设备名 (如 \\.\DISPLAY1) -> 目标主音量百分比 (0..=100)
@@ -61,6 +90,7 @@ impl Default for AppConfig {
             enabled: true,
             debounce_ms: 150,
             close_action: CloseAction::Ask,
+            theme_mode: ThemeMode::System,
             monitor_audio_map: BTreeMap::new(),
             monitor_volume_map: BTreeMap::new(),
             ignored_processes: Vec::new(),

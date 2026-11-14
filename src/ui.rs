@@ -1,10 +1,14 @@
 use crate::app_icon::{default_app_icon, enumerate_running_apps, load_exe_icon, RunningAppInfo};
 use crate::audio::{enumerate_playback_devices, get_device_volume, set_device_volume, AudioDevice};
-use crate::config::{is_auto_start_enabled, set_auto_start, AppConfig, CloseAction};
+use crate::config::{is_auto_start_enabled, set_auto_start, AppConfig, CloseAction, ThemeMode};
 use crate::monitor::{enumerate_monitors, MonitorInfo};
 use crate::switch_log::{clear_switch_logs, log_signature, open_log_in_editor, read_switch_logs};
 use slint::winit_030::{
-    winit::{dpi::PhysicalPosition, event::WindowEvent, window::Window as WinitWindow},
+    winit::{
+        dpi::PhysicalPosition,
+        event::WindowEvent,
+        window::{Theme as WinitTheme, Window as WinitWindow},
+    },
     EventResult, WinitWindowAccessor,
 };
 use slint::{
@@ -26,6 +30,8 @@ slint::include_modules!();
 
 struct SharedUiData {
     config: AppConfig,
+    saved_config: AppConfig,
+    saved_auto_start: bool,
     monitors: Vec<MonitorInfo>,
     devices: Vec<AudioDevice>,
     device_ids: Vec<Option<String>>,
@@ -237,6 +243,33 @@ fn sync_models_to_window(win: &SettingsWindow, data: &mut SharedUiData) {
     sync_ignored_and_available(win, data);
 }
 
+fn normalized_ignored_set(list: &[String]) -> Vec<String> {
+    let mut items: Vec<String> = list.iter().map(|s| s.to_ascii_lowercase()).collect();
+    items.sort();
+    items.dedup();
+    items
+}
+
+fn update_dirty_state(win: &SettingsWindow, data: &SharedUiData) {
+    let current_enabled = win.get_auto_switch_enabled();
+    let current_auto_start = win.get_auto_start_enabled();
+    let current_debounce = (win.get_debounce_ms().clamp(50, 2000)) as u64;
+    let current_close_action = CloseAction::from_index(win.get_close_action_index());
+    let current_theme_mode = ThemeMode::from_index(win.get_theme_mode_index());
+
+    let is_dirty = current_enabled != data.saved_config.enabled
+        || current_auto_start != data.saved_auto_start
+        || current_debounce != data.saved_config.debounce_ms.clamp(50, 2000)
+        || current_close_action != data.saved_config.close_action
+        || current_theme_mode != data.saved_config.theme_mode
+        || data.config.monitor_audio_map != data.saved_config.monitor_audio_map
+        || data.config.monitor_volume_map != data.saved_config.monitor_volume_map
+        || normalized_ignored_set(&data.ignored_list)
+            != normalized_ignored_set(&data.saved_config.ignored_processes);
+
+    win.set_has_unsaved_changes(is_dirty);
+}
+
 fn post_daemon_message(msg_id: u32) {
     unsafe {
         if let Ok(daemon_hwnd) =
@@ -275,6 +308,30 @@ fn sync_switch_logs_to_window(win: &SettingsWindow, data: &mut SharedUiData) {
     win.set_switch_logs(ModelRc::new(VecModel::from(rows)));
 }
 
+fn apply_theme_to_window(win: &SettingsWindow, mode: ThemeMode) {
+    let mut resolved_dark = None;
+    let _ = win.window().with_winit_window(|winit_win| {
+        let target_winit_theme = match mode {
+            ThemeMode::System => None,
+            ThemeMode::Light => Some(WinitTheme::Light),
+            ThemeMode::Dark => Some(WinitTheme::Dark),
+        };
+        winit_win.set_theme(target_winit_theme);
+        let effective = match mode {
+            ThemeMode::System => winit_win.theme().unwrap_or(WinitTheme::Light),
+            ThemeMode::Light => WinitTheme::Light,
+            ThemeMode::Dark => WinitTheme::Dark,
+        };
+        resolved_dark = Some(effective == WinitTheme::Dark);
+    });
+    if let Some(is_dark) = resolved_dark {
+        win.invoke_apply_color_scheme(is_dark);
+        let next = win.get_redraw_nonce().wrapping_add(1);
+        win.set_redraw_nonce(next);
+        win.window().request_redraw();
+    }
+}
+
 pub fn run_settings_window(
     reload_msg_id: u32,
     exit_msg_id: u32,
@@ -289,14 +346,18 @@ pub fn run_settings_window(
     };
 
     let config = AppConfig::load();
+    let initial_theme = config.theme_mode;
+    let initial_auto_start = is_auto_start_enabled();
     let monitors = enumerate_monitors();
     let devices = enumerate_playback_devices();
     let ignored_list = config.ignored_processes.clone();
     let all_running_apps = enumerate_running_apps();
 
+    win.set_app_version(SharedString::from(concat!("v", env!("CARGO_PKG_VERSION"))));
     win.set_active_tab(initial_tab.clamp(0, 1));
+    win.set_theme_mode_index(initial_theme.to_index());
     win.set_auto_switch_enabled(config.enabled);
-    win.set_auto_start_enabled(is_auto_start_enabled());
+    win.set_auto_start_enabled(initial_auto_start);
     win.set_debounce_ms(config.debounce_ms as i32);
     win.set_close_action_index(config.close_action.to_index());
     if let Some(st) = initial_status {
@@ -304,6 +365,8 @@ pub fn run_settings_window(
     }
 
     let data = Rc::new(RefCell::new(SharedUiData {
+        saved_config: config.clone(),
+        saved_auto_start: initial_auto_start,
         config,
         monitors,
         devices,
@@ -316,6 +379,17 @@ pub fn run_settings_window(
         icon_cache: HashMap::new(),
         fallback_icon: default_app_icon(),
     }));
+
+    {
+        let data = data.clone();
+        let weak = win.as_weak();
+        win.on_mark_dirty(move || {
+            if let Some(w) = weak.upgrade() {
+                let d = data.borrow();
+                update_dirty_state(&w, &d);
+            }
+        });
+    }
 
     {
         let mut d = data.borrow_mut();
@@ -426,6 +500,7 @@ pub fn run_settings_window(
                     }
                     model.set_row_data(r, row);
                 }
+                update_dirty_state(&w, &d);
             }
         });
     }
@@ -466,6 +541,7 @@ pub fn run_settings_window(
                 row.volume_enabled = false;
             }
             model.set_row_data(r, row);
+            update_dirty_state(&w, &d);
         });
     }
 
@@ -495,6 +571,7 @@ pub fn run_settings_window(
                     row.volume_percent = clamped as i32;
                     model.set_row_data(r, row);
                 }
+                update_dirty_state(&w, &d);
             }
 
             if apply_live {
@@ -562,6 +639,7 @@ pub fn run_settings_window(
             d.ignored_list.push(chosen.exe_name);
             if let Some(w) = weak.upgrade() {
                 sync_ignored_and_available(&w, &mut d);
+                update_dirty_state(&w, &d);
             }
         });
     }
@@ -578,6 +656,7 @@ pub fn run_settings_window(
             }
             if let Some(w) = weak.upgrade() {
                 sync_ignored_and_available(&w, &mut d);
+                update_dirty_state(&w, &d);
             }
         });
     }
@@ -592,11 +671,12 @@ pub fn run_settings_window(
             };
             let mut d = data.borrow_mut();
             d.config.enabled = w.get_auto_switch_enabled();
+            d.config.theme_mode = ThemeMode::from_index(w.get_theme_mode_index());
             d.config.debounce_ms = (w.get_debounce_ms().clamp(50, 2000)) as u64;
             d.config.close_action = CloseAction::from_index(w.get_close_action_index());
             d.config.ignored_processes = d.ignored_list.clone();
 
-            let _ = set_auto_start(w.get_auto_start_enabled());
+            let auto_start_ok = set_auto_start(w.get_auto_start_enabled()).is_ok();
             match d.config.save() {
                 Ok(_) => {
                     // 立即将各显示器已启用的固定音量应用到对应设备
@@ -605,13 +685,37 @@ pub fn run_settings_window(
                             let _ = set_device_volume(dev_id, *vol);
                         }
                     }
+                    d.saved_config = d.config.clone();
+                    if auto_start_ok {
+                        d.saved_auto_start = w.get_auto_start_enabled();
+                    }
                     // 通知后台守护进程热加载配置
                     post_daemon_message(reload_msg_id);
+                    update_dirty_state(&w, &d);
                     w.set_status_text(SharedString::from("设置已保存并热加载生效！"));
                 }
                 Err(e) => {
                     w.set_status_text(SharedString::from(format!("保存失败: {e}")));
                 }
+            }
+        });
+    }
+
+    // 顶部主题切换回调（自动 / 浅色 / 深色）
+    {
+        let data = data.clone();
+        let weak = win.as_weak();
+        win.on_theme_mode_changed(move |idx| {
+            let mode = ThemeMode::from_index(idx);
+            let mut disk_cfg = AppConfig::load();
+            disk_cfg.theme_mode = mode;
+            let _ = disk_cfg.save();
+            let mut d = data.borrow_mut();
+            d.config.theme_mode = mode;
+            d.saved_config.theme_mode = mode;
+            if let Some(w) = weak.upgrade() {
+                apply_theme_to_window(&w, mode);
+                update_dirty_state(&w, &d);
             }
         });
     }
@@ -654,7 +758,9 @@ pub fn run_settings_window(
             if let Some(w) = weak.upgrade() {
                 if remember {
                     w.set_close_action_index(action.to_index());
-                    data.borrow_mut().config.close_action = action;
+                    let mut d = data.borrow_mut();
+                    d.config.close_action = action;
+                    d.saved_config.close_action = action;
                     let mut disk_cfg = AppConfig::load();
                     disk_cfg.close_action = action;
                     if disk_cfg.save().is_ok() {
@@ -712,9 +818,19 @@ pub fn run_settings_window(
                     }
                 });
             }
+            if let WindowEvent::ThemeChanged(new_theme) = event {
+                if let Some(w) = weak.upgrade() {
+                    if ThemeMode::from_index(w.get_theme_mode_index()) == ThemeMode::System {
+                        w.invoke_apply_color_scheme(*new_theme == WinitTheme::Dark);
+                    }
+                }
+            }
             let should_redraw = matches!(
                 event,
-                WindowEvent::Resized(_) | WindowEvent::Focused(true) | WindowEvent::Occluded(false)
+                WindowEvent::Resized(_)
+                    | WindowEvent::Focused(true)
+                    | WindowEvent::Occluded(false)
+                    | WindowEvent::ThemeChanged(_)
             );
             if should_redraw {
                 if let Some(w) = weak.upgrade() {
@@ -728,6 +844,7 @@ pub fn run_settings_window(
     }
 
     let _ = win.show();
+    apply_theme_to_window(&win, initial_theme);
     let _ = win.window().with_winit_window(|winit_win| {
         if !centered.get() && center_winit_window(winit_win) {
             centered.set(true);

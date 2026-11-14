@@ -37,11 +37,21 @@ export struct SwitchLogRowData {
     volume-text: string,
 }
 
+global ThemeTokens {
+    in-out property <bool> is-dark: Palette.color-scheme == ColorScheme.dark;
+    out property <color> window-bg: is-dark ? #1c1c1c : #f3f4f6;
+    out property <color> card-bg: is-dark ? #2b2b2b : #ffffff;
+    out property <color> row-bg: is-dark ? #202020 : #f8f9fb;
+    out property <color> border-subtle: is-dark ? #ffffff18 : #00000018;
+    out property <color> divider: is-dark ? #ffffff14 : #00000012;
+    out property <color> popup-bg: is-dark ? #2c2c2c : #ffffff;
+}
+
 component Card inherits Rectangle {
-    background: Palette.alternate-background;
+    background: ThemeTokens.card-bg;
     border-radius: 10px;
     border-width: 1px;
-    border-color: Palette.border;
+    border-color: ThemeTokens.border-subtle;
 }
 
 component DangerButton inherits Rectangle {
@@ -52,10 +62,10 @@ component DangerButton inherits Rectangle {
     min-width: 84px;
     border-radius: 5px;
     border-width: 1px;
-    border-color: touch.has-hover ? #ef4444.transparentize(0.25) : Palette.border;
+    border-color: touch.has-hover ? #ef4444.transparentize(0.25) : ThemeTokens.border-subtle;
     background: touch.pressed
-        ? #ef4444.transparentize(0.76)
-        : (touch.has-hover ? #ef4444.transparentize(0.86) : Palette.background);
+        ? #ef4444.transparentize(0.78)
+        : (touch.has-hover ? #ef4444.transparentize(0.88) : ThemeTokens.row-bg);
 
     HorizontalLayout {
         padding-left: 14px;
@@ -65,7 +75,9 @@ component DangerButton inherits Rectangle {
             font-size: 13px;
             horizontal-alignment: center;
             vertical-alignment: center;
-            color: touch.has-hover ? #f87171 : Palette.foreground.transparentize(0.12);
+            color: touch.has-hover
+                ? (ThemeTokens.is-dark ? #f87171 : #dc2626)
+                : Palette.foreground.transparentize(0.12);
         }
     }
 
@@ -80,14 +92,17 @@ component DangerButton inherits Rectangle {
 export component SettingsWindow inherits Window {
     title: "SoundCast 设置";
     icon: @image-url("../assets/icon.png");
-    preferred-width: 760px;
-    preferred-height: 830px;
-    min-width: 720px;
-    min-height: 790px;
-    background: Palette.background;
+    preferred-width: 780px;
+    preferred-height: 810px;
+    min-width: 740px;
+    min-height: 775px;
+    background: ThemeTokens.window-bg;
     default-font-family: "Microsoft YaHei UI";
 
     in-out property <int> active-tab: 0;
+    in-out property <int> theme-mode-index: 0;
+    in-out property <string> app-version: "v0.2.0";
+    in-out property <bool> has-unsaved-changes: false;
     in-out property <bool> auto-switch-enabled: true;
     in-out property <bool> auto-start-enabled: false;
     in-out property <int> debounce-ms: 150;
@@ -114,7 +129,14 @@ export component SettingsWindow inherits Window {
     callback monitor-selection-changed(int, int);
     callback monitor-volume-toggled(int, bool);
     callback monitor-volume-changed(int, int, bool);
+    callback theme-mode-changed(int);
     callback refresh-clicked();
+
+    public function apply-color-scheme(dark: bool) {
+        Palette.color-scheme = dark ? ColorScheme.dark : ColorScheme.light;
+        ThemeTokens.is-dark = dark;
+    }
+    callback mark-dirty();
     callback refresh-logs-clicked();
     callback clear-logs-clicked();
     callback open-log-file-clicked();
@@ -131,7 +153,7 @@ export component SettingsWindow inherits Window {
     Rectangle {
         width: 100%;
         height: 100%;
-        background: Palette.background;
+        background: ThemeTokens.window-bg;
         opacity: Math.mod(root.redraw-nonce, 2) == 0 ? 1.0 : 0.9999;
     }
 
@@ -146,11 +168,11 @@ export component SettingsWindow inherits Window {
             width: 100%;
             height: 100%;
             border-radius: 10px;
-            background: Palette.alternate-background;
+            background: ThemeTokens.popup-bg;
             border-width: 1px;
-            border-color: Palette.border;
+            border-color: ThemeTokens.border-subtle;
             drop-shadow-blur: 16px;
-            drop-shadow-color: #000000.transparentize(0.45);
+            drop-shadow-color: #000000.transparentize(ThemeTokens.is-dark ? 0.45 : 0.82);
             drop-shadow-offset-y: 4px;
 
             VerticalLayout {
@@ -251,7 +273,7 @@ export component SettingsWindow inherits Window {
                     alignment: center;
                     spacing: 3px;
                     HorizontalLayout {
-                        spacing: 10px;
+                        spacing: 8px;
                         alignment: start;
                         Text {
                             text: "SoundCast";
@@ -261,16 +283,35 @@ export component SettingsWindow inherits Window {
                             color: Palette.foreground;
                         }
                         Rectangle {
+                            height: 20px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 5px;
+                            background: ThemeTokens.card-bg;
+                            border-width: 1px;
+                            border-color: ThemeTokens.border-subtle;
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                Text {
+                                    text: root.app-version;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    color: Palette.foreground.transparentize(0.32);
+                                }
+                            }
+                        }
+                        Rectangle {
                             height: 22px;
                             y: (parent.height - self.height) / 2;
                             border-radius: 6px;
                             background: url-touch.has-hover
-                                ? Palette.accent-background.transparentize(0.82)
-                                : Palette.alternate-background;
+                                ? Palette.accent-background.transparentize(0.84)
+                                : ThemeTokens.card-bg;
                             border-width: 1px;
                             border-color: url-touch.has-hover
                                 ? Palette.accent-background.transparentize(0.35)
-                                : Palette.border;
+                                : ThemeTokens.border-subtle;
                             HorizontalLayout {
                                 padding-left: 8px;
                                 padding-right: 8px;
@@ -320,35 +361,86 @@ export component SettingsWindow inherits Window {
                 }
             }
 
-            Rectangle {
-                height: 28px;
-                min-width: 96px;
-                y: (parent.height - self.height) / 2;
-                border-radius: 14px;
-                background: root.auto-switch-enabled ? #107c10.transparentize(0.84) : Palette.border.transparentize(0.5);
-                border-width: 1px;
-                border-color: root.auto-switch-enabled ? #107c10.transparentize(0.5) : Palette.border;
+            HorizontalLayout {
+                spacing: 8px;
 
-                HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    spacing: 6px;
-                    alignment: center;
+                // 手动主题切换（跟随系统 / 浅色 / 深色）
+                Rectangle {
+                    height: 28px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 14px;
+                    background: ThemeTokens.card-bg;
+                    border-width: 1px;
+                    border-color: ThemeTokens.border-subtle;
 
-                    Rectangle {
-                        width: 8px;
-                        height: 8px;
-                        y: (parent.height - self.height) / 2;
-                        border-radius: 4px;
-                        background: root.auto-switch-enabled ? #16a34a : Palette.foreground.transparentize(0.5);
+                    HorizontalLayout {
+                        padding: 3px;
+                        spacing: 2px;
+
+                        for item[tidx] in ["自动", "浅色", "深色"]: Rectangle {
+                            height: 22px;
+                            border-radius: 11px;
+                            background: root.theme-mode-index == tidx
+                                ? ThemeTokens.row-bg
+                                : (t-touch.has-hover ? ThemeTokens.row-bg.transparentize(0.4) : transparent);
+                            border-width: root.theme-mode-index == tidx ? 1px : 0px;
+                            border-color: Palette.accent-background.transparentize(0.4);
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                Text {
+                                    text: item;
+                                    font-size: 11px;
+                                    font-weight: root.theme-mode-index == tidx ? 600 : 400;
+                                    vertical-alignment: center;
+                                    color: root.theme-mode-index == tidx
+                                        ? Palette.foreground
+                                        : Palette.foreground.transparentize(0.32);
+                                }
+                            }
+
+                            t-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.theme-mode-index = tidx;
+                                    root.theme-mode-changed(tidx);
+                                }
+                            }
+                        }
                     }
+                }
 
-                    Text {
-                        text: root.auto-switch-enabled ? "运行中" : "已暂停";
-                        font-size: 12px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                        color: root.auto-switch-enabled ? #16a34a : Palette.foreground.transparentize(0.3);
+                Rectangle {
+                    height: 28px;
+                    min-width: 88px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 14px;
+                    background: root.auto-switch-enabled ? #107c10.transparentize(0.84) : Palette.border.transparentize(0.5);
+                    border-width: 1px;
+                    border-color: root.auto-switch-enabled ? #107c10.transparentize(0.5) : Palette.border;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 6px;
+                        alignment: center;
+
+                        Rectangle {
+                            width: 8px;
+                            height: 8px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 4px;
+                            background: root.auto-switch-enabled ? #16a34a : Palette.foreground.transparentize(0.5);
+                        }
+
+                        Text {
+                            text: root.auto-switch-enabled ? "运行中" : "已暂停";
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            color: root.auto-switch-enabled ? #16a34a : Palette.foreground.transparentize(0.3);
+                        }
                     }
                 }
             }
@@ -358,9 +450,9 @@ export component SettingsWindow inherits Window {
         Rectangle {
             height: 36px;
             border-radius: 8px;
-            background: Palette.alternate-background;
+            background: ThemeTokens.card-bg;
             border-width: 1px;
-            border-color: Palette.border;
+            border-color: ThemeTokens.border-subtle;
 
             HorizontalLayout {
                 padding: 3px;
@@ -370,8 +462,8 @@ export component SettingsWindow inherits Window {
                     horizontal-stretch: 1;
                     border-radius: 6px;
                     background: root.active-tab == 0
-                        ? Palette.background
-                        : (tab0-touch.has-hover ? Palette.background.transparentize(0.55) : transparent);
+                        ? ThemeTokens.row-bg
+                        : (tab0-touch.has-hover ? ThemeTokens.row-bg.transparentize(0.4) : transparent);
                     border-width: root.active-tab == 0 ? 1px : 0px;
                     border-color: Palette.accent-background.transparentize(0.45);
                     Text {
@@ -396,8 +488,8 @@ export component SettingsWindow inherits Window {
                     horizontal-stretch: 1;
                     border-radius: 6px;
                     background: root.active-tab == 1
-                        ? Palette.background
-                        : (tab1-touch.has-hover ? Palette.background.transparentize(0.55) : transparent);
+                        ? ThemeTokens.row-bg
+                        : (tab1-touch.has-hover ? ThemeTokens.row-bg.transparentize(0.4) : transparent);
                     border-width: root.active-tab == 1 ? 1px : 0px;
                     border-color: Palette.accent-background.transparentize(0.45);
                     Text {
@@ -458,6 +550,9 @@ export component SettingsWindow inherits Window {
                             Switch {
                                 text: "启用自动切换";
                                 checked <=> root.auto-switch-enabled;
+                                toggled => {
+                                    root.mark-dirty();
+                                }
                             }
                         }
 
@@ -466,6 +561,9 @@ export component SettingsWindow inherits Window {
                             Switch {
                                 text: "开机自启动";
                                 checked <=> root.auto-start-enabled;
+                                toggled => {
+                                    root.mark-dirty();
+                                }
                             }
                         }
                     }
@@ -475,7 +573,7 @@ export component SettingsWindow inherits Window {
                         width: 1px;
                         height: 58px;
                         y: (parent.height - self.height) / 2;
-                        background: Palette.border.transparentize(0.45);
+                        background: ThemeTokens.divider;
                     }
 
                     // 右栏：数值与关闭行为设置（右侧控件等宽对齐）
@@ -501,6 +599,9 @@ export component SettingsWindow inherits Window {
                                 maximum: 2000;
                                 step-size: 50;
                                 value <=> root.debounce-ms;
+                                edited(v) => {
+                                    root.mark-dirty();
+                                }
                             }
                         }
 
@@ -519,6 +620,9 @@ export component SettingsWindow inherits Window {
                                 height: 32px;
                                 model: ["每次询问", "隐藏到托盘", "退出应用"];
                                 current-index <=> root.close-action-index;
+                                selected(v) => {
+                                    root.mark-dirty();
+                                }
                             }
                         }
                     }
@@ -528,7 +632,7 @@ export component SettingsWindow inherits Window {
 
         // 显示器映射卡片
         Card {
-            min-height: 245px;
+            min-height: 228px;
             vertical-stretch: 1;
             VerticalBox {
                 padding-left: 16px;
@@ -558,7 +662,7 @@ export component SettingsWindow inherits Window {
                 }
 
                 ScrollView {
-                    min-height: 195px;
+                    min-height: 176px;
                     vertical-stretch: 1;
                     VerticalLayout {
                         padding: 2px;
@@ -578,9 +682,9 @@ export component SettingsWindow inherits Window {
                         for row[idx] in root.monitor-rows: Rectangle {
                             height: 92px;
                             border-radius: 8px;
-                            background: Palette.background;
+                            background: ThemeTokens.row-bg;
                             border-width: 1px;
-                            border-color: Palette.border.transparentize(0.4);
+                            border-color: ThemeTokens.border-subtle;
 
                             VerticalLayout {
                                 padding-left: 14px;
@@ -652,7 +756,7 @@ export component SettingsWindow inherits Window {
 
                                 Rectangle {
                                     height: 1px;
-                                    background: Palette.border.transparentize(0.65);
+                                    background: ThemeTokens.divider;
                                 }
 
                                 HorizontalLayout {
@@ -734,10 +838,10 @@ export component SettingsWindow inherits Window {
                         y: (parent.height - self.height) / 2;
                         border-radius: 6px;
                         background: !root.can-add-ignored
-                            ? Palette.background.transparentize(0.4)
-                            : (picker-touch.has-hover ? Palette.background.brighter(0.15) : Palette.background);
+                            ? ThemeTokens.row-bg.transparentize(0.35)
+                            : (picker-touch.has-hover ? ThemeTokens.row-bg.brighter(0.06) : ThemeTokens.row-bg);
                         border-width: 1px;
-                        border-color: Palette.border;
+                        border-color: ThemeTokens.border-subtle;
 
                         HorizontalLayout {
                             padding-left: 10px;
@@ -812,9 +916,9 @@ export component SettingsWindow inherits Window {
                         if root.ignored-processes.length == 0: Rectangle {
                             height: 92px;
                             border-radius: 8px;
-                            background: Palette.background.transparentize(0.45);
+                            background: ThemeTokens.row-bg;
                             border-width: 1px;
-                            border-color: Palette.border.transparentize(0.55);
+                            border-color: ThemeTokens.border-subtle;
 
                             VerticalLayout {
                                 alignment: center;
@@ -838,9 +942,9 @@ export component SettingsWindow inherits Window {
                         for proc[pidx] in root.ignored-processes: Rectangle {
                             height: 36px;
                             border-radius: 6px;
-                            background: Palette.background;
+                            background: ThemeTokens.row-bg;
                             border-width: 1px;
-                            border-color: Palette.border.transparentize(0.5);
+                            border-color: ThemeTokens.border-subtle;
 
                             HorizontalLayout {
                                 padding-left: 10px;
@@ -945,9 +1049,9 @@ export component SettingsWindow inherits Window {
                 Rectangle {
                     height: 28px;
                     border-radius: 6px;
-                    background: Palette.background;
+                    background: ThemeTokens.row-bg;
                     border-width: 1px;
-                    border-color: Palette.border.transparentize(0.45);
+                    border-color: ThemeTokens.border-subtle;
 
                     HorizontalLayout {
                         padding-left: 10px;
@@ -1012,9 +1116,9 @@ export component SettingsWindow inherits Window {
                         for log[lidx] in root.switch-logs: Rectangle {
                             height: 48px;
                             border-radius: 7px;
-                            background: Palette.background;
+                            background: ThemeTokens.row-bg;
                             border-width: 1px;
-                            border-color: Palette.border.transparentize(0.5);
+                            border-color: ThemeTokens.border-subtle;
 
                             HorizontalLayout {
                                 padding-left: 10px;
@@ -1119,11 +1223,14 @@ export component SettingsWindow inherits Window {
             spacing: 8px;
 
             Text {
-                text: root.status-text;
+                text: root.has-unsaved-changes ? "有未保存的修改，请点击右侧“保存并应用”生效" : root.status-text;
                 font-size: 12px;
+                font-weight: root.has-unsaved-changes ? 600 : 400;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
-                color: Palette.foreground.transparentize(0.28);
+                color: root.has-unsaved-changes
+                    ? Palette.accent-background
+                    : Palette.foreground.transparentize(0.28);
                 overflow: elide;
             }
 
@@ -1139,7 +1246,7 @@ export component SettingsWindow inherits Window {
                 width: 1px;
                 height: 18px;
                 y: (parent.height - self.height) / 2;
-                background: Palette.border.transparentize(0.35);
+                background: ThemeTokens.divider;
             }
 
             Button {
@@ -1180,11 +1287,11 @@ export component SettingsWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-radius: 12px;
-            background: Palette.alternate-background;
+            background: ThemeTokens.popup-bg;
             border-width: 1px;
-            border-color: Palette.border;
+            border-color: ThemeTokens.border-subtle;
             drop-shadow-blur: 24px;
-            drop-shadow-color: #000000.transparentize(0.35);
+            drop-shadow-color: #000000.transparentize(ThemeTokens.is-dark ? 0.35 : 0.78);
             drop-shadow-offset-y: 8px;
 
             VerticalBox {
